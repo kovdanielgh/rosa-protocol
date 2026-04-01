@@ -1,6 +1,6 @@
 # ROSA Protocol Specification
 
-`v0.4 — draft — subject to change`
+`v0.5 — draft — subject to change`
 
 ---
 
@@ -35,6 +35,11 @@ Broadcaster      — software process that holds the Task Queue for a sector
 Delta Watcher    — component of the Broadcaster that monitors the sector
                    Observation Store for unplanned state deviations and
                    generates reactive tasks or alerts accordingly.
+Sector Store     — observation store maintained by the Broadcaster for its
+                   sector. Aggregates observations written directly by agents.
+                   Source of truth for the Delta Watcher.
+Unmanaged zone   — area with no active job plan. Delta Watcher skips
+                   unmanaged cells unless an explicit rule covers them.
 Zero point       — physical reference established before swarm activation.
                    All agent positions are relative to this point.
 Bootstrap config — minimal configuration loaded by an agent at startup.
@@ -53,17 +58,16 @@ ROSA defines two strictly separated layers with a single interface.
 ║  Slicer ──► Task Queue ◄── Delta Watcher         ║
 ║                  │               ▲               ║
 ║                  ▼               │               ║
-║             Broadcaster(s) ──────┘               ║
-║                                                  ║
-║  Owns: intent, coordinate system, task graph,    ║
-║  capability requirements, delta rules            ║
+║             Broadcaster ◄──── Sector Store       ║
+║                                  ▲               ║
+║                            (agents write here)   ║
 ╚══════════════════════╤═══════════════════════════╝
                        │ single interface
                        │ ← task_request    (swarm → operator)
                        │ → task_assign     (operator → swarm)
                        │ ← task_status     (swarm → operator)
                        │ → cancel_signal   (operator → swarm)
-                       │ ← delta_alert     (operator layer → operator UI)
+                       │ ← agent_shutdown  (swarm → operator)
 ╔══════════════════════▼═══════════════════════════╗
 ║                  SWARM LAYER                     ║
 ║                                                  ║
@@ -74,9 +78,9 @@ ROSA defines two strictly separated layers with a single interface.
 ╚══════════════════════════════════════════════════╝
 ```
 
-The swarm cannot push data upward. The operator cannot reach inside
-the swarm. The Broadcaster is the only crossing point. There is no
-global Observation Store — only local stores per agent and per sector.
+The swarm cannot push data upward except via the defined interface.
+The operator cannot reach inside the swarm. The Broadcaster is the
+only crossing point. There is no global Observation Store.
 
 Agents never create tasks. Task creation is exclusively the
 responsibility of the Operator Layer — either via Slicer (planned)
@@ -92,9 +96,11 @@ crossing sector boundaries switch Broadcasters autonomously.
 
 ### 2.2 Broadcaster persistence
 
-A Broadcaster must checkpoint its Task Queue to durable storage at
-configurable intervals. On restart it recovers from the last checkpoint.
-CLAIMED tasks whose timeout has expired are returned to OPEN on recovery.
+A Broadcaster must checkpoint its Task Queue and Sector Store to
+durable storage at configurable intervals. On restart it recovers from
+the last checkpoint. CLAIMED tasks whose timeout has expired are
+returned to OPEN on recovery. Delta Watcher resumes from last known
+sector state.
 
 ### 2.3 Observation Store federation
 
@@ -175,9 +181,10 @@ This is the only configuration an agent receives externally.
 ```
 BootstrapConfig {
   broadcaster_address:  string
+  sector_store_address: string       // may be same host as broadcaster
   zero_point:           GeoPoint
   sector_id:            string
-  time_source:          string        // NTP/PTP address or "gps"
+  time_source:          string       // NTP/PTP address or "gps"
   agent_id:             UUID
   capabilities:         List<CapabilityID>
 }
@@ -196,8 +203,17 @@ Bootstrap sequence:
 
 The environment is modelled as an append-only log of Observations.
 State is never stored directly — it is always derived from observations.
-Each agent maintains a local store bounded to its local zone.
-Sector-level stores aggregate agent observations within a sector.
+
+There are two store levels:
+
+```
+Local store   — agent-owned, bounded to local zone, LRU+TTL eviction.
+               Used for local decisions and neighbor sync.
+
+Sector store  — Broadcaster-owned, covers entire sector.
+               Source of truth for Delta Watcher and operator queries.
+               Agents write to it directly (see 6.7).
+```
 
 ### 6.1 Observation structure
 
@@ -259,26 +275,42 @@ radius D are marked DISTURBED. Observations from DISTURBED cells receive
 reduced aggregation weight until the task completes and the zone is
 rescanned.
 
-### 6.6 Observation propagation
+### 6.6 Observation propagation between agents
 
-Agents share observations with neighbors within their local zone.
-This is the mechanism by which local consensus spreads across the swarm.
+Agents share observations with peers within their local zone.
 
 ```
-Propagation rules:
+Agent broadcasts fresh observations to local zone peers at a
+configurable rate (default: on write, max 1Hz flood protection).
 
-  Agent broadcasts fresh observations to local zone peers at a
-  configurable rate (default: on write, max 1Hz to prevent flooding).
+Receiving agent applies conflict resolution (6.4) before accepting.
 
-  Receiving agent applies conflict resolution (6.4) before accepting
-  a remote observation into its local cache.
+Remote observations retain original agent_id and timestamp.
+They are never re-attributed to the receiving agent.
 
-  Remote observations retain their original agent_id and timestamp.
-  They are never re-attributed to the receiving agent.
+An observation propagates at most one hop via peer channels.
+Agents do not relay observations received from other agents.
+Wider propagation happens via Sector Store (see 6.7).
+```
 
-  An observation propagates at most one hop beyond its origin zone.
-  Agents do not relay observations received from other agents.
-  Wider propagation happens via sector-level store aggregation only.
+### 6.7 Agent → Sector Store write path
+
+Every observation an agent writes to its local cache is also written
+asynchronously to the Sector Store.
+
+```
+On observation write:
+  1. Write to local cache (synchronous)
+  2. Enqueue for Sector Store write (asynchronous)
+
+If Sector Store is unreachable:
+  Observations are queued locally (bounded queue, FIFO).
+  Queue is drained in order when connection is restored.
+  Queue overflow evicts oldest entries first.
+
+The Sector Store is the source of truth for the Delta Watcher.
+Agents do not read from the Sector Store — they read from local cache
+and neighbor propagation only.
 ```
 
 ---
@@ -297,6 +329,7 @@ Agent {
   current_task:    TaskID | null
   coalition:       List<AgentID> | null
   local_cache:     ObservationStore     // bounded, LRU+TTL
+  sector_queue:    WriteQueue           // buffered writes to Sector Store
   neighbor_table:  Map<AgentID, NeighborRecord>
 }
 
@@ -305,14 +338,13 @@ NeighborRecord {
   last_seen:     unix_ms
   position:      Vector3
   reliability:   float
-  ttl:           seconds    // record expires if no heartbeat received
+  ttl:           seconds
 }
 ```
 
 ### 7.2 Neighbor discovery
 
 Neighbors are discovered passively through AGENT_STATUS heartbeats.
-No explicit discovery handshake is required.
 
 ```
 On receiving AGENT_STATUS from agent X:
@@ -337,6 +369,7 @@ On TTL expiry for agent X:
          │ SCANNING │  read local zone           │
          └────┬─────┘  write PASSIVE obs         │
               │         propagate to neighbors   │
+              │         write to Sector Store    │
               ▼                                  │
          ┌──────────┐                           │
          │ PLANNING │  select atomic action      │
@@ -351,6 +384,7 @@ On TTL expiry for agent X:
          ┌──────────────┐                       │
          │  VERIFYING   │  scan result           │
          └──────┬───────┘  write ACTIVE obs      │
+                │          write to Sector Store │
                 │                                │
         ┌───────┴────────┐                      │
         ▼                ▼                      │
@@ -360,11 +394,18 @@ On TTL expiry for agent X:
         │                │                      │
         └────────────────┴──────────────────────┘
 
-On CANCEL signal received at any state:
+On CANCEL signal:
   complete current atomic action
   emit TASK_FAIL for current task
   return to IDLE
   stop pulling new tasks
+
+On graceful shutdown:
+  emit AGENT_SHUTDOWN to Broadcaster
+  complete current atomic action
+  emit TASK_FAIL for current task
+  flush sector_queue
+  disconnect
 ```
 
 ### 7.4 Reliability score
@@ -382,9 +423,9 @@ if reliability(agent) < threshold:
 ### 7.5 Offline behaviour
 
 An agent that loses contact with its Broadcaster continues operating
-using its local cache. When contact is restored the agent syncs all
-observations produced during isolation. The swarm does not stop when
-a Broadcaster is unreachable.
+using its local cache. Sector Store writes are queued. When contact
+is restored the agent syncs the queue and notifies the Broadcaster
+of any task status changes that occurred offline.
 
 ---
 
@@ -411,6 +452,26 @@ JobState:
   FAILED    — all tasks exhausted max_attempts
 ```
 
+### 8.1 Dependency graph validation
+
+On Job creation the Broadcaster validates the task dependency graph
+before accepting the Job.
+
+```
+Validation rules:
+  1. Graph must be a DAG (directed acyclic graph).
+     A cycle causes the Job to be rejected with CYCLE_DETECTED error.
+
+  2. All task IDs referenced in depends_on must exist within the Job
+     or be DONE tasks from a previously completed Job.
+
+  3. not_before timestamps on dependent tasks must be ≥ not_before of
+     all their dependencies (where applicable).
+
+If validation fails:
+  Job is rejected. No tasks are queued. Error returned to operator.
+```
+
 Cancelling a Job sets all non-terminal Tasks to CANCELLED and sends
 CANCEL signals to all agents currently holding CLAIMED tasks within
 that Job.
@@ -423,22 +484,23 @@ that Job.
 
 ```
 Task {
-  id:              UUID
-  job_id:          UUID
-  position:        Vector3
-  required_caps:   Set<CapabilityID>
-  coalition_size:  int               // default: 1
-  target_state:    bytes             // domain-defined
-  tolerance:       bytes
-  depends_on:      List<TaskID>
-  not_before:      unix_ms | null    // earliest execution time
-  priority:        int
-  priority_cap:    int               // max priority after escalation
-  timeout:         seconds
-  deadline:        unix_ms | null
-  status:          TaskState
-  attempt_count:   int
-  max_attempts:    int | null        // null = unlimited
+  id:                UUID
+  job_id:            UUID
+  position:          Vector3
+  required_caps:     Set<CapabilityID>
+  coalition_size:    int               // default: 1
+  coalition_timeout: seconds           // max wait to form coalition
+  target_state:      bytes
+  tolerance:         bytes
+  depends_on:        List<TaskID>
+  not_before:        unix_ms | null
+  priority:          int
+  priority_cap:      int
+  timeout:           seconds
+  deadline:          unix_ms | null
+  status:            TaskState
+  attempt_count:     int
+  max_attempts:      int | null
 }
 ```
 
@@ -452,7 +514,6 @@ DONE      — verified complete
 FAILED    — returned to OPEN after timeout or TASK_FAIL
 CANCELLED — terminal. Never reopened.
 EXHAUSTED — attempt_count reached max_attempts. Terminal.
-            Broadcaster emits DELTA_ALERT with reason "task_exhausted".
 ```
 
 ### 9.3 Priority escalation
@@ -464,23 +525,20 @@ On each FAILED → OPEN transition:
 
   if max_attempts set and attempt_count >= max_attempts:
     task.status → EXHAUSTED
-    Broadcaster emits DELTA_ALERT
+    Broadcaster emits DELTA_ALERT with reason "task_exhausted"
 ```
 
 ### 9.4 Wait tasks
 
-Time-based blocking (curing, drying, cooling) is expressed as a WAIT
-task with no required_caps and a not_before timestamp. The Broadcaster
-transitions WAIT tasks to DONE automatically when not_before is reached.
-No agent action required.
+Time-based blocking is expressed as a WAIT task with no required_caps
+and a not_before timestamp. The Broadcaster transitions WAIT tasks to
+DONE automatically when not_before is reached. No agent action required.
 
 ```
-Example — concrete curing:
-
 Task {
   id:            "cure-42"
   required_caps: []
-  not_before:    T + 28800s       // 8 hours
+  not_before:    T + 28800s    // 8 hours
 }
 
 Task {
@@ -504,7 +562,7 @@ Broadcaster assigns:
   starts timeout countdown
 
 If timeout expires:
-  task → OPEN (priority escalates, see 9.3)
+  task → OPEN (priority escalates)
 ```
 
 ### 9.6 Task cancellation
@@ -523,9 +581,17 @@ Operator cancels task_id or job_id:
 Task with coalition_size > 1:
   First qualifying agent → LEAD role
   LEAD emits coalition_request to local zone
-  Required agents respond → coalition formed
-  LEAD coordinates execution
-  On completion → LEAD dissolves → all agents IDLE
+  LEAD waits up to coalition_timeout for responses
+
+  If coalition formed within timeout:
+    LEAD coordinates execution
+    On completion → LEAD dissolves → all agents IDLE
+
+  If coalition_timeout expires before full coalition:
+    LEAD emits TASK_FAIL
+    task → OPEN
+    attempt_count increments (see 9.3)
+    LEAD returns to IDLE
 ```
 
 ### 9.8 Capability deficit
@@ -537,17 +603,33 @@ DELTA_ALERT with reason CAPABILITY_DEFICIT. Swarm continues other work.
 
 ## 10. Delta Watcher
 
-The Delta Watcher monitors the sector Observation Store for unplanned
-deltas — observed states that differ from expected states with no
-corresponding active task.
+The Delta Watcher monitors the Sector Store for unplanned deltas —
+observed states that differ from expected states with no corresponding
+active task.
 
-### 10.1 Delta Rule structure
+### 10.1 Managed vs unmanaged zones
+
+```
+Managed zone   — area covered by an active or recently completed job.
+                 Delta Watcher evaluates all cells in managed zones.
+
+Unmanaged zone — area with no job plan.
+                 Delta Watcher skips unmanaged cells unless a DeltaRule
+                 explicitly targets them via position_zone condition.
+
+To establish baseline expected state for an unmanaged area:
+  Operator creates a baseline scan Job (tasks with SCAN capability,
+  no target_state transformation). On completion, the area becomes
+  managed and Delta Watcher can monitor it against that baseline.
+```
+
+### 10.2 Delta Rule structure
 
 ```
 DeltaRule {
   id:        UUID
   name:      string
-  priority:  int                    // rule evaluation order
+  priority:  int                    // evaluation order, lower = first
 
   condition {
     observed_type:   string | null  // match on measurement classification
@@ -566,26 +648,29 @@ DeltaRule {
 ```
 
 Rules are defined by the operator before swarm activation.
-They are evaluated in priority order — first match wins.
+Evaluated in priority order — first match wins.
 
-### 10.2 Detection cycle
+### 10.3 Detection cycle
 
 ```
 Delta Watcher runs at configurable interval (default: 1s):
 
-  for each cell in sector Observation Store:
+  for each cell in Sector Store:
+    if cell is in unmanaged zone and no rule targets it → skip
+
     current  = aggregate(observations for cell)
     expected = target_state from active job plan
+               or baseline state if no active job
 
     if |current − expected| > tolerance:
-      if active task covers this cell → skip
+      if active task already covers this cell → skip
       else:
         evaluate rules in priority order
         first match → execute action
         no match    → emit DELTA_ALERT
 ```
 
-### 10.3 DELTA_ALERT
+### 10.4 DELTA_ALERT
 
 ```
 DELTA_ALERT {
@@ -611,21 +696,26 @@ not pause waiting for operator response.
 Agents emit only these message types. All others are ignored.
 
 ```
-ENV_DELTA      — emitted after successful verification
-                 contains: position, what changed, confidence
-                 scope: local zone only
+ENV_DELTA        — emitted after successful verification
+                   contains: position, what changed, confidence
+                   scope: local zone only
 
-TASK_CLAIM     — emitted when agent begins a task
-                 scope: local zone only
+TASK_CLAIM       — emitted when agent begins a task
+                   scope: local zone only
 
-TASK_FAIL      — emitted when agent cannot complete task
-                 releases task back to OPEN
-                 scope: local zone only
+TASK_FAIL        — emitted when agent cannot complete task
+                   releases task back to OPEN
+                   scope: local zone only
 
-AGENT_STATUS   — periodic heartbeat, minimum 1Hz
-                 contains: position, state, resources, reliability
-                 scope: local zone only
-                 used for neighbor discovery and reliability tracking
+AGENT_STATUS     — periodic heartbeat, minimum 1Hz
+                   contains: position, state, resources, reliability
+                   scope: local zone only
+                   used for neighbor discovery and reliability tracking
+
+AGENT_SHUTDOWN   — emitted on graceful shutdown
+                   contains: agent_id, current_task_id | null
+                   scope: Broadcaster only
+                   triggers: immediate task release, neighbor table cleanup
 ```
 
 ---
@@ -658,6 +748,11 @@ Silent failure (agent stops responding):
   Neighbor TTL expires → removed from neighbor table
   CLAIMED tasks return to OPEN via timeout
 
+Graceful shutdown (AGENT_SHUTDOWN received):
+  Broadcaster immediately returns CLAIMED task to OPEN
+  No timeout wait required
+  Agent removed from neighbor tables on next AGENT_STATUS cycle
+
 Byzantine failure (agent sends false data):
   Detected via physical verification by neighbors
   reliability(agent) decreases toward exclusion threshold
@@ -666,12 +761,12 @@ Byzantine failure (agent sends false data):
 Broadcaster failure (temporary):
   Agents enter offline mode (see 7.5)
   Work continues on cached tasks
-  Sync on reconnect
+  Sector Store writes queued and drained on reconnect
 
 Broadcaster failure (permanent):
   New Broadcaster recovers from last checkpoint
   CLAIMED tasks past timeout return to OPEN on recovery
-  Delta Watcher resumes from last known sector state
+  Delta Watcher resumes from last known Sector Store state
 ```
 
 ---
@@ -709,6 +804,7 @@ Intentionally left to implementation:
 - Slicer implementation and task decomposition logic
 - Federation protocol between installations
 - Delta Rule evaluation engine internals
+- Sector Store storage engine and indexing
 - Any domain-specific behaviour
 
 ---
