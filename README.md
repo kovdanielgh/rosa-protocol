@@ -1,34 +1,76 @@
-Goal is to make local consensus system for robotic swarms.
+# ROSA
 
-It could help humanity achieve new heights in global challenges.
+> Decentralized coordination protocol for physical agent swarms.  
+> Where environment is memory. Where physics is truth.
 
-Major problems: 
+![version](https://img.shields.io/badge/version-0.1--alpha-gray)
+![protocol](https://img.shields.io/badge/type-protocol-blue)
+![license](https://img.shields.io/badge/spec-open-green)
 
-1. Consistency of information (data sharing)
-2. Ant knowledge
-3. Quality check
+---
 
+## What is ROSA?
 
-1 - We need to create local consensus, not global. Global consensus will be achieved as result of 
-local consistency.
+ROSA is a protocol for coordinating swarms of physical agents — robots,
+drones, or any autonomous hardware — without a central server, without
+global state, and without human supervision.
 
-2 - Environment is data storage.
+The key insight: agents don't need to communicate with each other directly.
+They communicate through the environment itself. The physical world becomes
+shared memory.
 
-What is it ROSA? 
+---
 
-- Decentralized protocol of coordination between physical agents where environment is swarm data storage.
+## Three principles
 
-What will be proof of success?
+**01 — Environment as memory**  
+Agents don't maintain a global map. They read and write the physical
+environment directly. State lives in the world, not in any single node.
 
-- Swarm with N bots executes physical task in unstructurized environent without central server or human attendance.
+**02 — Local consensus**  
+No agent needs global knowledge. Each agent reaches agreement only with
+its neighbors. Global coherence emerges from local interactions — like
+termites building cathedrals.
 
-What is minimal demo?
+**03 — Physics as verification**  
+Agents verify their own actions by scanning the environment before and
+after. No external quality check. Reality itself is the authority.
 
-- 5 bots sync execute one simple task using only local communication. For example flatten some surface
+---
 
-# Protocol Specification
+## Why this matters
+```
+Housing crisis      → swarm builds
+Ocean microplastics → swarm collects  
+Wildfire zones      → swarm restores
+Lunar base          → swarm constructs
+Mars                → swarm terraforms
 
-Principal 1: Environment as data storage
-Principal 2: Local consensus
-Principal 3: Physics as verification authority
+same protocol. different agents. different world.
+```
 
+---
+
+## Proof of success
+
+N agents execute a physical task in an unstructured environment —  
+no central server, no human attendance, no predefined map.
+
+## Minimal demo
+
+5 agents synchronously flatten a surface using only local communication
+and environmental feedback.
+
+---
+
+## What's in this repo
+
+- `SPEC.md` — protocol specification (what, not how)
+- `PHILOSOPHY.md` — three principles in depth
+- `examples/simulation` — reference 2D simulation
+- `docs/` — architecture overview and research context
+
+---
+
+*Core protocol implementation is proprietary. This repository contains
+the open specification and reference examples.*  
