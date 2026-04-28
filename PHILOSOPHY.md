@@ -134,5 +134,5 @@ contact with better implementations. If it is wrong, we want to know.
 
 ---
 
-*ROSA Protocol · Budapest, 2026*  
+*ROSA Protocol · Budapest, 2026*
 *Questions and challenges welcome via GitHub issues.*

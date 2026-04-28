@@ -810,4 +810,4 @@ Intentionally left to implementation:
 ---
 
 *ROSA Protocol · open specification · implementation proprietary*
-*Budapest, 2025 · feedback via GitHub issues*
+*Budapest, 2026 · feedback via GitHub issues*
