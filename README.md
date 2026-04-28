@@ -64,7 +64,6 @@ No global map. No central commander during execution.
 
 - [SPEC.md](SPEC.md) — protocol specification (v0.5 draft)
 - [PHILOSOPHY.md](PHILOSOPHY.md) — three principles in depth
-- `examples/simulation` — reference 2D simulation
 
 ---
 
