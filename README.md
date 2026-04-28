@@ -56,7 +56,7 @@ same protocol. different agents. different world.
 8 agents flatten an unstructured surface in 60 seconds.
 No global map. No central commander during execution.
 
-[link to demo video](/assets/ROSA%20trailer.mp4)
+[link to demo video](https://github.com/user-attachments/assets/2ec9ca81-a773-4ddf-9784-3e518cfffb63)
 
 ---
 
